@@ -3,5 +3,7 @@ pip install -r requirements.txt
 
 #run
 python worker.py --queue_url YOUR_SQS_QUEUE_URL
+python worker.py --queue_url "https://sqs.us-east-2.amazonaws.com/635071011057/2025-03-15-youtube-transcription-queue" --s3_bucket 2025-03-15-youtube-transcripts --region us-east-2
 
-
+#sending videos to the queue.
+python send_to_queue.py --youtube_url "https://www.youtube.com/watch?v=R6QQDy1OUhE"
