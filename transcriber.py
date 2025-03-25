@@ -1,9 +1,16 @@
 #!/usr/bin/python3
+# transcriber.py - WhisperX Transcription Module
+
 import os
-import subprocess
-import logging
 import json
-from typing import List, Dict, Any, Tuple
+import logging
+import numpy as np
+import torch
+import whisperx
+from datetime import datetime
+import tempfile
+import boto3
+import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
@@ -11,234 +18,409 @@ class TranscriptionError(Exception):
     """Exception raised for errors during transcription"""
     pass
 
-class AudioSegmenter:
-    """Splits audio files into manageable segments"""
+class ModelLoadError(TranscriptionError):
+    """Exception raised for errors loading the model"""
+    pass
+
+class AudioProcessingError(TranscriptionError):
+    """Exception raised for errors processing audio"""
+    pass
+
+class Transcriber:
+    """Handles audio transcription using WhisperX with chunking and progress tracking"""
     
-    def __init__(self, segment_duration=60):
-        """Initialize the segmenter"""
-        self.segment_duration = segment_duration
-    
-    def get_audio_duration(self, wav_file):
-        """Get duration of WAV file in seconds"""
-        cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", wav_file
-        ]
-        
-        try:
-            result = subprocess.run(
-                cmd, 
-                capture_output=True, 
-                text=True, 
-                check=True
-            )
-            
-            duration = float(result.stdout.strip())
-            return duration
-            
-        except subprocess.SubprocessError as e:
-            logger.error(f"Error getting audio duration: {str(e)}")
-            raise
-    
-    def split_audio(self, wav_file, output_dir):
+    def __init__(self, model_name="large-v2", device="cuda", chunk_size=30, 
+                 s3_bucket=None, region="us-east-1", batch_size=16):
         """
-        Split WAV file into segments
+        Initialize the transcriber
         
         Args:
-            wav_file: Path to WAV file
-            output_dir: Directory to save segments
-            
-        Returns:
-            List of paths to segment files
+            model_name: WhisperX model to use
+            device: Device to run model on ('cuda' or 'cpu')
+            chunk_size: Size of audio chunks in seconds
+            s3_bucket: S3 bucket for storing intermediate results
+            region: AWS region
+            batch_size: Batch size for processing
         """
-        os.makedirs(output_dir, exist_ok=True)
-        
-        try:
-            total_duration = self.get_audio_duration(wav_file)
-            segments = []
-            idx = 0
-            start_time = 0
-            
-            while start_time < total_duration:
-                output_file = os.path.join(output_dir, f"segment_{idx:03d}.wav")
-                
-                # Run ffmpeg with minimal output
-                result = subprocess.run([
-                    "ffmpeg", "-y",
-                    "-ss", str(start_time),
-                    "-t", str(self.segment_duration),
-                    "-i", wav_file,
-                    output_file
-                ], capture_output=True, text=True, check=False)
-                
-                if result.returncode != 0:
-                    logger.error(f"Error splitting segment {idx}: {result.stderr}")
-                    raise Exception(f"ffmpeg error: {result.stderr}")
-                
-                segments.append(output_file)
-                
-                # Log less frequently
-                if idx % 5 == 0:
-                    logger.info(f"Created segment {idx} from {start_time:.0f} to {start_time + self.segment_duration:.0f} sec")
-                    
-                idx += 1
-                start_time += self.segment_duration
-                
-            logger.info(f"Created {len(segments)} segments total")
-            return segments
-            
-        except Exception as e:
-            logger.error(f"Error splitting audio: {str(e)}")
-            raise
-
-
-class WhisperTranscriber:
-    """Transcribes audio segments using WhisperX"""
-    
-    def __init__(self, use_gpu=True):
-        """Initialize the transcriber"""
-        self.use_gpu = use_gpu
+        self.model_name = model_name
+        self.device = "cuda" if torch.cuda.is_available() and device == "cuda" else "cpu"
+        self.chunk_size = chunk_size
+        self.s3_bucket = s3_bucket
+        self.s3 = boto3.client('s3', region_name=region) if s3_bucket else None
+        self.batch_size = batch_size
         self.model = None
-        self.device = "cuda" if use_gpu else "cpu"
-    
+        
+        logger.info(f"Initializing transcriber with model={model_name}, device={self.device}")
+        
     def load_model(self):
-        """Load WhisperX model"""
+        """Load the WhisperX model"""
         if self.model is not None:
             return
             
         try:
-            # Reduce TensorFlow logging
-            os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+            logger.info(f"Loading WhisperX model {self.model_name} on {self.device}")
+            self.model = whisperx.load_model(self.model_name, self.device)
             
-            import whisperx
-            compute_type = "float16" if self.use_gpu else "float32"
-            
-            logger.info("Loading WhisperX model (this may take a moment)...")
-            self.model = whisperx.load_model(
-                "large", device=self.device, compute_type=compute_type
+            # Load alignment model for improved word-level timestamps
+            logger.info("Loading alignment model")
+            self.alignment_model, self.metadata = whisperx.load_align_model(
+                language_code="en", 
+                device=self.device
             )
-            logger.info("WhisperX model loaded successfully")
             
-        except ImportError:
-            error_msg = "WhisperX is not installed. Install via 'pip install whisperx'"
-            logger.error(error_msg)
-            raise TranscriptionError(error_msg)
-            
+            logger.info("Models loaded successfully")
         except Exception as e:
-            error_msg = f"Error loading WhisperX model: {str(e)}"
+            error_msg = f"Failed to load WhisperX model: {str(e)}"
             logger.error(error_msg)
-            raise TranscriptionError(error_msg)
+            raise ModelLoadError(error_msg)
     
-    def transcribe_segment(self, segment_file):
+    def segment_audio(self, audio_file, output_dir):
         """
-        Transcribe a single audio segment
+        Split audio file into chunks for processing
         
         Args:
-            segment_file: Path to segment WAV file
+            audio_file: Path to audio file
+            output_dir: Directory to save chunks
             
         Returns:
-            Transcribed text
+            List of chunk file paths
         """
-        # Load model if not already loaded
-        if self.model is None:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Load audio file
+            logger.info(f"Loading audio file: {audio_file}")
+            audio_data, sample_rate = sf.read(audio_file)
+            
+            # Calculate chunk size in samples
+            chunk_samples = int(self.chunk_size * sample_rate)
+            total_samples = len(audio_data)
+            
+            # Create chunks
+            chunk_files = []
+            for i, start_idx in enumerate(range(0, total_samples, chunk_samples)):
+                end_idx = min(start_idx + chunk_samples, total_samples)
+                chunk_data = audio_data[start_idx:end_idx]
+                
+                # Save chunk
+                chunk_file = os.path.join(output_dir, f"chunk_{i:04d}.wav")
+                sf.write(chunk_file, chunk_data, sample_rate)
+                chunk_files.append(chunk_file)
+                
+            logger.info(f"Created {len(chunk_files)} audio chunks")
+            return chunk_files
+            
+        except Exception as e:
+            error_msg = f"Error segmenting audio: {str(e)}"
+            logger.error(error_msg)
+            raise AudioProcessingError(error_msg)
+    
+    def transcribe_audio(self, audio_file, job_id=None, job_tracker=None, video_id=None, language="en"):
+        """
+        Transcribe audio file with progress tracking
+        
+        Args:
+            audio_file: Path to audio file
+            job_id: Job ID for tracking
+            job_tracker: JobTracker instance for progress updates
+            video_id: YouTube video ID
+            language: Language code
+            
+        Returns:
+            Transcription result with word-level timestamps
+        """
+        try:
+            # Ensure model is loaded
             self.load_model()
             
-        import whisperx
-        
-        segment_name = os.path.basename(segment_file)
-        segment_num = int(segment_name.split('_')[1].split('.')[0])
-        
-        # Log less frequently for cleaner output
-        if segment_num % 5 == 0:
-            logger.info(f"Transcribing segment {segment_num}...")
-        
-        # Redirect stdout/stderr during WhisperX operations
-        old_stdout, old_stderr = os.dup(1), os.dup(2)
-        
-        try:
-            # Silence standard output during transcription
-            with open(os.devnull, 'w') as devnull:
-                os.dup2(devnull.fileno(), 1)
-                os.dup2(devnull.fileno(), 2)
+            # Create temporary directory for chunks
+            with tempfile.TemporaryDirectory() as temp_dir:
+                logger.info(f"Created temporary directory: {temp_dir}")
                 
-                # Perform transcription
-                result = self.model.transcribe(segment_file)
-                language = result.get("language", "en")
+                # Segment audio
+                chunk_files = self.segment_audio(audio_file, temp_dir)
                 
-                # Align the result
-                align_model, metadata = whisperx.load_align_model(language, self.device)
-                result_aligned = whisperx.align(result["segments"], align_model, metadata, segment_file, self.device)
+                if job_tracker and job_id:
+                    job_tracker.update_progress(job_id, total_chunks=len(chunk_files), completed_chunks=0)
                 
-                # Extract text from segments
-                transcription = ""
-                for segment in result_aligned["segments"]:
-                    transcription += segment["text"].strip() + " "
+                # Process each chunk
+                all_segments = []
+                
+                for i, chunk_file in enumerate(chunk_files):
+                    logger.info(f"Processing chunk {i+1}/{len(chunk_files)}")
                     
-                return transcription.strip()
+                    # Transcribe chunk
+                    result = self.model.transcribe(chunk_file, batch_size=self.batch_size, language=language)
+                    
+                    # Align words for precise timestamps
+                    result = whisperx.align(
+                        result["segments"],
+                        self.alignment_model,
+                        self.metadata,
+                        chunk_file,
+                        device=self.device
+                    )
+                    
+                    # Adjust timestamps for chunk position
+                    chunk_start_time = i * self.chunk_size
+                    for segment in result["segments"]:
+                        segment["start"] += chunk_start_time
+                        segment["end"] += chunk_start_time
+                        
+                        for word in segment["words"]:
+                            word["start"] += chunk_start_time
+                            word["end"] += chunk_start_time
+                    
+                    # Add to results
+                    all_segments.extend(result["segments"])
+                    
+                    # Save progress to S3 if needed
+                    if self.s3_bucket and video_id:
+                        segment_key = f"transcripts/{video_id}/segments/chunk_{i:04d}.json"
+                        self.s3.put_object(
+                            Body=json.dumps(result["segments"]),
+                            Bucket=self.s3_bucket,
+                            Key=segment_key,
+                            ContentType="application/json"
+                        )
+                    
+                    # Update progress
+                    if job_tracker and job_id:
+                        job_tracker.update_progress(job_id, completed_chunks=i+1)
+                
+                # Combine results
+                final_result = {
+                    "segments": sorted(all_segments, key=lambda x: x["start"]),
+                    "language": language,
+                    "video_id": video_id,
+                    "transcribed_at": datetime.now().isoformat()
+                }
+                
+                # Save complete transcript
+                if self.s3_bucket and video_id:
+                    transcript_key = f"transcripts/{video_id}/full_transcript.json"
+                    self.s3.put_object(
+                        Body=json.dumps(final_result),
+                        Bucket=self.s3_bucket,
+                        Key=transcript_key,
+                        ContentType="application/json"
+                    )
+                
+                return final_result
                 
         except Exception as e:
-            logger.error(f"Error transcribing segment {segment_file}: {str(e)}")
-            raise TranscriptionError(f"Transcription error: {str(e)}")
-            
-        finally:
-            # Restore stdout/stderr
-            os.dup2(old_stdout, 1)
-            os.dup2(old_stderr, 2)
-            os.close(old_stdout)
-            os.close(old_stderr)
+            error_msg = f"Error transcribing audio: {str(e)}"
+            logger.error(error_msg)
+            raise TranscriptionError(error_msg)
     
-    def transcribe_segments(self, segment_files, output_dir=None):
+    def load_transcript_from_s3(self, video_id):
         """
-        Transcribe multiple segments
+        Load transcript from S3 if it exists
         
         Args:
-            segment_files: List of segment WAV files
-            output_dir: Directory to save transcript files (defaults to same as segments)
+            video_id: YouTube video ID
             
         Returns:
-            List of (segment_file, transcript_file) tuples
+            Transcript data or None if not found
         """
-        results = []
-        
-        for segment_file in segment_files:
-            try:
-                # Determine output directory
-                if output_dir is None:
-                    output_dir = os.path.dirname(segment_file)
-                    
-                # Create transcript filename
-                transcript_file = segment_file.replace(".wav", ".txt")
-                
-                # Transcribe the segment
-                transcription = self.transcribe_segment(segment_file)
-                
-                # Save to file
-                with open(transcript_file, "w", encoding="utf-8") as f:
-                    f.write(transcription)
-                    
-                results.append((segment_file, transcript_file))
-                
-            except Exception as e:
-                logger.error(f"Error processing segment {segment_file}: {str(e)}")
-                # Continue with other segments
-        
-        return results
+        if not self.s3_bucket:
+            return None
+            
+        try:
+            transcript_key = f"transcripts/{video_id}/full_transcript.json"
+            response = self.s3.get_object(Bucket=self.s3_bucket, Key=transcript_key)
+            transcript_data = json.loads(response['Body'].read().decode('utf-8'))
+            return transcript_data
+            
+        except self.s3.exceptions.NoSuchKey:
+            return None
+        except Exception as e:
+            logger.error(f"Error loading transcript from S3: {str(e)}")
+            return None
     
-    def cleanup(self):
-        """Release resources"""
-        import gc
-        import torch
+    def load_segment_from_s3(self, video_id, chunk_index):
+        """
+        Load specific segment from S3
         
-        # Clear model references
-        self.model = None
+        Args:
+            video_id: YouTube video ID
+            chunk_index: Chunk index to load
+            
+        Returns:
+            Segment data or None if not found
+        """
+        if not self.s3_bucket:
+            return None
+            
+        try:
+            segment_key = f"transcripts/{video_id}/segments/chunk_{chunk_index:04d}.json"
+            response = self.s3.get_object(Bucket=self.s3_bucket, Key=segment_key)
+            segment_data = json.loads(response['Body'].read().decode('utf-8'))
+            return segment_data
+            
+        except self.s3.exceptions.NoSuchKey:
+            return None
+        except Exception as e:
+            logger.error(f"Error loading segment from S3: {str(e)}")
+            return None
+    
+    def get_completed_segments(self, video_id):
+        """
+        Get list of completed segment indices from S3
         
-        # Run garbage collection
-        gc.collect()
+        Args:
+            video_id: YouTube video ID
+            
+        Returns:
+            List of completed segment indices
+        """
+        if not self.s3_bucket:
+            return []
+            
+        try:
+            prefix = f"transcripts/{video_id}/segments/"
+            response = self.s3.list_objects_v2(
+                Bucket=self.s3_bucket,
+                Prefix=prefix
+            )
+            
+            completed = []
+            if 'Contents' in response:
+                for item in response['Contents']:
+                    key = item['Key']
+                    # Extract index from chunk_XXXX.json
+                    chunk_file = os.path.basename(key)
+                    if chunk_file.startswith('chunk_') and chunk_file.endswith('.json'):
+                        idx_str = chunk_file[6:10]  # Extract XXXX part
+                        completed.append(int(idx_str))
+                        
+            return sorted(completed)
+            
+        except Exception as e:
+            logger.error(f"Error listing completed segments: {str(e)}")
+            return []
+    
+    def resume_transcription(self, audio_file, job_id, job_tracker, video_id, language="en"):
+        """
+        Resume transcription from where it left off
         
-        # Clear CUDA cache if available
-        if self.use_gpu and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            logger.info("Cleared CUDA cache")
+        Args:
+            audio_file: Path to audio file
+            job_id: Job ID for tracking
+            job_tracker: JobTracker instance
+            video_id: YouTube video ID
+            language: Language code
+            
+        Returns:
+            Transcription result
+        """
+        # Check if full transcript already exists
+        full_transcript = self.load_transcript_from_s3(video_id)
+        if full_transcript:
+            logger.info(f"Found complete transcript for {video_id}, skipping transcription")
+            return full_transcript
+        
+        # Get list of segments already processed
+        completed_segments = self.get_completed_segments(video_id)
+        logger.info(f"Found {len(completed_segments)} completed segments for {video_id}")
+        
+        # Continue with normal transcription but skip completed chunks
+        try:
+            # Ensure model is loaded
+            self.load_model()
+            
+            # Create temporary directory for chunks
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Segment audio
+                chunk_files = self.segment_audio(audio_file, temp_dir)
+                
+                if job_tracker:
+                    job_tracker.update_progress(job_id, total_chunks=len(chunk_files), 
+                                             completed_chunks=len(completed_segments))
+                
+                # Process each chunk that hasn't been completed
+                all_segments = []
+                
+                # First load all completed segments
+                for idx in completed_segments:
+                    segment_data = self.load_segment_from_s3(video_id, idx)
+                    if segment_data:
+                        all_segments.extend(segment_data)
+                
+                # Process remaining chunks
+                for i, chunk_file in enumerate(chunk_files):
+                    if i in completed_segments:
+                        logger.info(f"Skipping already processed chunk {i}")
+                        continue
+                        
+                    logger.info(f"Processing chunk {i+1}/{len(chunk_files)}")
+                    
+                    # Transcribe chunk
+                    result = self.model.transcribe(chunk_file, batch_size=self.batch_size, language=language)
+                    
+                    # Align words for precise timestamps
+                    result = whisperx.align(
+                        result["segments"],
+                        self.alignment_model,
+                        self.metadata,
+                        chunk_file,
+                        device=self.device
+                    )
+                    
+                    # Adjust timestamps for chunk position
+                    chunk_start_time = i * self.chunk_size
+                    for segment in result["segments"]:
+                        segment["start"] += chunk_start_time
+                        segment["end"] += chunk_start_time
+                        
+                        for word in segment["words"]:
+                            word["start"] += chunk_start_time
+                            word["end"] += chunk_start_time
+                    
+                    # Add to results
+                    all_segments.extend(result["segments"])
+                    
+                    # Save progress to S3
+                    if self.s3_bucket:
+                        segment_key = f"transcripts/{video_id}/segments/chunk_{i:04d}.json"
+                        self.s3.put_object(
+                            Body=json.dumps(result["segments"]),
+                            Bucket=self.s3_bucket,
+                            Key=segment_key,
+                            ContentType="application/json"
+                        )
+                    
+                    # Update progress
+                    if job_tracker:
+                        job_tracker.update_progress(
+                            job_id, 
+                            completed_chunks=len(completed_segments) + i + 1
+                        )
+                
+                # Combine results
+                final_result = {
+                    "segments": sorted(all_segments, key=lambda x: x["start"]),
+                    "language": language,
+                    "video_id": video_id,
+                    "transcribed_at": datetime.now().isoformat()
+                }
+                
+                # Save complete transcript
+                if self.s3_bucket:
+                    transcript_key = f"transcripts/{video_id}/full_transcript.json"
+                    self.s3.put_object(
+                        Body=json.dumps(final_result),
+                        Bucket=self.s3_bucket,
+                        Key=transcript_key,
+                        ContentType="application/json"
+                    )
+                
+                return final_result
+                
+        except Exception as e:
+            error_msg = f"Error resuming transcription: {str(e)}"
+            logger.error(error_msg)
+            raise TranscriptionError(error_msg)
 
 
 # Example usage
@@ -246,27 +428,20 @@ if __name__ == "__main__":
     # Simple test code
     logging.basicConfig(level=logging.INFO)
     
+    # Create transcriber (for testing only)
+    transcriber = Transcriber(model_name="base", device="cuda")
+    
+    # Test with a local WAV file
     try:
-        # Initialize segmenter
-        segmenter = AudioSegmenter(segment_duration=30)  # 30-second segments for testing
+        result = transcriber.transcribe_audio("./temp/test/audio.wav")
+        print(f"Transcription result: {len(result['segments'])} segments")
         
-        # Split a sample WAV file
-        sample_wav = "./sample.wav"  # Replace with your test file
-        segments = segmenter.split_audio(sample_wav, "./temp/segments")
-        
-        # Initialize transcriber
-        transcriber = WhisperTranscriber(use_gpu=False)  # CPU mode for testing
-        
-        # Transcribe the first segment
-        if segments:
-            test_segment = segments[0]
-            print(f"Transcribing test segment: {test_segment}")
-            
-            text = transcriber.transcribe_segment(test_segment)
-            print(f"Transcription: {text}")
-            
-            # Clean up
-            transcriber.cleanup()
+        # Print first few segments
+        for i, segment in enumerate(result['segments'][:3]):
+            print(f"Segment {i}: {segment['start']:.2f}s - {segment['end']:.2f}s")
+            print(f"Text: {segment['text']}")
+            print("Words:", [word['word'] for word in segment['words']])
+            print()
             
     except Exception as e:
         print(f"Error: {str(e)}")
