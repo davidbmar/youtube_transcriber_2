@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhisperX Transcript Viewer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/aws-sdk/2.1123.0/aws-sdk.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 20px;
+            background-color: #fff;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-width: 200px;
+        }
+        .button-group {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+        input, select, button {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #3367d6;
+        }
+        button:disabled {
+            background-color: #a8a8a8;
+            cursor: not-allowed;
+        }
+        .transcript-container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            position: relative;
+        }
+        #transcript {
+            margin-top: 20px;
+        }
+        .segment {
+            margin-bottom: 20px;
+            border-left: 3px solid #4285f4;
+            padding-left: 15px;
+        }
+        .segment-time {
+            font-size: 12px;
+            color: #555;
+            margin-bottom: 5px;
+        }
+        .segment-text {
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        .word-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            margin-bottom: 10px;
+        }
+        .word {
+            position: relative;
+            padding: 3px 5px;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .word:hover {
+            background-color: #e3f2fd;
+        }
+        .word-tooltip {
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #333;
+            color: white;
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+            white-space: nowrap;
+            z-index: 1000;
+        }
+        .word:hover .word-tooltip {
+            opacity: 1;
+        }
+        .confidence-high {
+            background-color: rgba(76, 175, 80, 0.2);
+            border-bottom: 2px solid #4caf50;
+        }
+        .confidence-medium {
+            background-color: rgba(255, 193, 7, 0.2);
+            border-bottom: 2px solid #ffc107;
+        }
+        .confidence-low {
+            background-color: rgba(244, 67, 54, 0.2);
+            border-bottom: 2px solid #f44336;
+        }
+        .search-box {
+            margin-top: 10px;
+            width: 100%;
+        }
+        .timeline {
+            position: relative;
+            height: 40px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+            margin-top: 20px;
+            overflow: hidden;
+        }
+        .timeline-progress {
+            position: absolute;
+            height: 100%;
+            background-color: rgba(66, 133, 244, 0.2);
+            width: 0;
+            pointer-events: none;
+        }
+        .timeline-segments {
+            position: absolute;
+            height: 100%;
+            width: 100%;
+            display: flex;
+        }
+        .timeline-marker {
+            position: absolute;
+            top: 0;
+            height: 100%;
+            width: 2px;
+            background-color: red;
+            z-index: 10;
+        }
+        .timeline-segment {
+            height: 100%;
+            position: relative;
+            cursor: pointer;
+            border-right: 1px solid rgba(0, 0, 0, 0.1);
+        }
+        .timeline-segment:hover {
+            background-color: rgba(66, 133, 244, 0.3);
+        }
+        #loader {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        #error-message {
+            color: #f44336;
+            text-align: center;
+            margin: 20px 0;
+            display: none;
+        }
+        .highlight {
+            background-color: yellow !important;
+        }
+        .center {
+            text-align: center;
+        }
+        .pagination {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        .pagination button {
+            margin: 0 5px;
+        }
+        .status-info {
+            text-align: center;
+            font-size: 14px;
+            color: #666;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>WhisperX Transcript Viewer</h1>
+        </div>
+        
+        <div class="controls">
+            <div class="input-group">
+                <label for="s3-bucket">S3 Bucket:</label>
+                <input type="text" id="s3-bucket" value="2025-03-15-youtube-transcripts" placeholder="S3 Bucket Name">
+            </div>
+            <div class="input-group">
+                <label for="s3-region">Region:</label>
+                <input type="text" id="s3-region" value="us-east-2" placeholder="S3 Region (e.g., us-east-2)">
+            </div>
+            <div class="input-group">
+                <label for="video-id">Video ID:</label>
+                <input type="text" id="video-id" placeholder="Enter YouTube Video ID">
+            </div>
+            <div class="button-group">
+                <button id="load-btn">Load Transcript</button>
+                <button id="clear-btn">Clear</button>
+            </div>
+        </div>
+        
+        <div id="loader">
+            <div class="spinner"></div>
+            <p>Loading transcript data...</p>
+        </div>
+        
+        <div id="error-message"></div>
+        
+        <div id="transcript-wrapper" style="display: none;">
+            <div class="controls">
+                <div class="input-group">
+                    <label for="search-text">Search in transcript:</label>
+                    <input type="text" id="search-text" class="search-box" placeholder="Enter text to search">
+                </div>
+                <div class="button-group">
+                    <button id="search-btn">Search</button>
+                    <button id="clear-search-btn">Clear Search</button>
+                </div>
+            </div>
+            
+            <div class="timeline" id="timeline">
+                <div class="timeline-progress" id="timeline-progress"></div>
+                <div class="timeline-segments" id="timeline-segments"></div>
+                <div class="timeline-marker" id="timeline-marker" style="display: none;"></div>
+            </div>
+            
+            <div class="status-info">
+                <span id="segment-count">0</span> segments | 
+                <span id="word-count">0</span> words | 
+                Duration: <span id="duration">0:00</span>
+            </div>
+            
+            <div class="transcript-container">
+                <div id="transcript"></div>
+            </div>
+            
+            <div class="pagination">
+                <button id="prev-page" disabled>Previous Page</button>
+                <span id="page-info">Page 1 of 1</span>
+                <button id="next-page" disabled>Next Page</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Constants and configurations
+        const SEGMENTS_PER_PAGE = 20;
+        const CONFIDENCE_THRESHOLDS = {
+            HIGH: 0.8,
+            MEDIUM: 0.6
+        };
+        
+        // Global variables
+        let transcriptData = null;
+        let currentPage = 1;
+        let totalPages = 1;
+        let searchResults = [];
+        let currentSearchIndex = -1;
+        
+        // DOM Elements
+        const loadBtn = document.getElementById('load-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const s3BucketInput = document.getElementById('s3-bucket');
+        const s3RegionInput = document.getElementById('s3-region');
+        const videoIdInput = document.getElementById('video-id');
+        const transcriptElem = document.getElementById('transcript');
+        const transcriptWrapper = document.getElementById('transcript-wrapper');
+        const loader = document.getElementById('loader');
+        const errorMessage = document.getElementById('error-message');
+        const searchTextInput = document.getElementById('search-text');
+        const searchBtn = document.getElementById('search-btn');
+        const clearSearchBtn = document.getElementById('clear-search-btn');
+        const prevPageBtn = document.getElementById('prev-page');
+        const nextPageBtn = document.getElementById('next-page');
+        const pageInfo = document.getElementById('page-info');
+        const segmentCount = document.getElementById('segment-count');
+        const wordCount = document.getElementById('word-count');
+        const durationElem = document.getElementById('duration');
+        const timelineSegments = document.getElementById('timeline-segments');
+        
+        // Main functionality
+        loadBtn.addEventListener('click', loadTranscript);
+        clearBtn.addEventListener('click', clearTranscript);
+        searchBtn.addEventListener('click', searchTranscript);
+        clearSearchBtn.addEventListener('click', clearSearch);
+        prevPageBtn.addEventListener('click', () => {
+            if (currentPage > 1) {
+                currentPage--;
+                renderTranscript();
+            }
+        });
+        nextPageBtn.addEventListener('click', () => {
+            if (currentPage < totalPages) {
+                currentPage++;
+                renderTranscript();
+            }
+        });
+        
+        // Functions
+        function loadTranscript() {
+            const bucketName = s3BucketInput.value.trim();
+            const region = s3RegionInput.value.trim();
+            const videoId = videoIdInput.value.trim();
+            
+            if (!bucketName || !videoId) {
+                showError("Please enter both S3 bucket name and video ID");
+                return;
+            }
+            
+            resetUI();
+            showLoader(true);
+            
+            // Configure S3 for public access
+            AWS.config.region = region;
+            AWS.config.credentials = new AWS.Credentials('dummy', 'dummy'); // Using dummy credentials
+            
+            const s3 = new AWS.S3({
+                signatureVersion: 'v4',
+                s3ForcePathStyle: true, // Use path-style URLs
+                endpoint: `https://${bucketName}.s3.${region}.amazonaws.com`,
+                params: { Bucket: bucketName }
+            });
+            
+            // Set up XHR instead of using the S3 SDK directly
+            function getS3Object(key) {
+                return new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    const url = `https://${bucketName}.s3.${region}.amazonaws.com/${key}`;
+                    
+                    xhr.open('GET', url, true);
+                    xhr.onload = function() {
+                        if (xhr.status === 200) {
+                            resolve(xhr.responseText);
+                        } else {
+                            reject(new Error(`Failed to load ${url}: ${xhr.status} ${xhr.statusText}`));
+                        }
+                    };
+                    xhr.onerror = function() {
+                        reject(new Error(`Network error when loading ${url}`));
+                    };
+                    xhr.send();
+                });
+            }
+            
+            // First try to get the full transcript
+            const fullTranscriptKey = `transcripts/${videoId}/full_transcript.json`;
+            
+            getS3Object(fullTranscriptKey)
+                .then(data => {
+                    // Full transcript exists, process it
+                    try {
+                        const jsonData = JSON.parse(data);
+                        processFullTranscript(jsonData);
+                    } catch (parseErr) {
+                        showError("Error parsing transcript data: " + parseErr.message);
+                    }
+                })
+                .catch(err => {
+                    console.log("Full transcript not found, trying to list segments:", err);
+                    
+                    // Try using fetch API to list objects (GET request to bucket with prefix)
+                    fetch(`https://${bucketName}.s3.${region}.amazonaws.com/?list-type=2&prefix=transcripts/${videoId}/segments/&delimiter=/`)
+                        .then(response => response.text())
+                        .then(data => {
+                            // Parse XML response
+                            const parser = new DOMParser();
+                            const xmlDoc = parser.parseFromString(data, "text/xml");
+                            
+                            // Extract segment keys
+                            const contents = xmlDoc.getElementsByTagName("Contents");
+                            if (!contents || contents.length === 0) {
+                                throw new Error("No transcript segments found");
+                            }
+                            
+                            const segmentKeys = [];
+                            for (let i = 0; i < contents.length; i++) {
+                                const key = contents[i].getElementsByTagName("Key")[0].textContent;
+                                if (key.endsWith('.json')) {
+                                    segmentKeys.push(key);
+                                }
+                            }
+                            
+                            if (segmentKeys.length === 0) {
+                                throw new Error("No JSON transcript segments found");
+                            }
+                            
+                            // Sort segments by name
+                            segmentKeys.sort((a, b) => {
+                                const numA = parseInt(a.match(/chunk_(\d+)\.json/)?.[1] || '0');
+                                const numB = parseInt(b.match(/chunk_(\d+)\.json/)?.[1] || '0');
+                                return numA - numB;
+                            });
+                            
+                            // Load all segment files
+                            return Promise.all(segmentKeys.map(key => getS3Object(key)));
+                        })
+                        .then(segments => {
+                            // Parse all segment JSON data
+                            const parsedSegments = segments.map(segment => JSON.parse(segment));
+                            processSegments(parsedSegments);
+                        })
+                        .catch(err => {
+                            showError("Error loading transcript data: " + err.message);
+                        });
+                });
+        }
+        
+        function processFullTranscript(data) {
+            transcriptData = {
+                segments: data.segments || [],
+                language: data.language || 'en',
+                video_id: data.video_id
+            };
+            
+            showLoader(false);
+            displayTranscript();
+        }
+        
+        function processSegments(segments) {
+            // Segments might be arrays themselves or objects with segments property
+            let allSegments = [];
+            
+            segments.forEach(segment => {
+                if (Array.isArray(segment)) {
+                    allSegments = allSegments.concat(segment);
+                } else if (segment.segments && Array.isArray(segment.segments)) {
+                    allSegments = allSegments.concat(segment.segments);
+                } else {
+                    // It might be a single segment object
+                    allSegments.push(segment);
+                }
+            });
+            
+            // Sort segments by start time just to be safe
+            allSegments.sort((a, b) => a.start - b.start);
+            
+            transcriptData = {
+                segments: allSegments,
+                language: 'en', // Default language
+                video_id: videoIdInput.value.trim()
+            };
+            
+            showLoader(false);
+            displayTranscript();
+        }
+        
+        function displayTranscript() {
+            if (!transcriptData || !transcriptData.segments || transcriptData.segments.length === 0) {
+                showError("No transcript data found or empty transcript");
+                return;
+            }
+            
+            // Display statistics
+            segmentCount.textContent = transcriptData.segments.length;
+            
+            let totalWordCount = 0;
+            transcriptData.segments.forEach(segment => {
+                if (segment.words && Array.isArray(segment.words)) {
+                    totalWordCount += segment.words.length;
+                }
+            });
+            wordCount.textContent = totalWordCount;
+            
+            // Calculate duration
+            const lastSegment = transcriptData.segments[transcriptData.segments.length - 1];
+            const totalDurationSeconds = lastSegment.end;
+            const minutes = Math.floor(totalDurationSeconds / 60);
+            const seconds = Math.floor(totalDurationSeconds % 60);
+            durationElem.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            
+            // Calculate pagination
+            totalPages = Math.ceil(transcriptData.segments.length / SEGMENTS_PER_PAGE);
+            currentPage = 1;
+            
+            // Render timeline
+            renderTimeline();
+            
+            // Render the transcript
+            renderTranscript();
+            
+            // Show the transcript wrapper
+            transcriptWrapper.style.display = 'block';
+        }
+        
+        function renderTimeline() {
+            timelineSegments.innerHTML = '';
+            
+            if (!transcriptData || !transcriptData.segments.length) return;
+            
+            const lastSegment = transcriptData.segments[transcriptData.segments.length - 1];
+            const totalDuration = lastSegment.end;
+            
+            transcriptData.segments.forEach((segment, index) => {
+                const segmentWidth = ((segment.end - segment.start) / totalDuration) * 100;
+                const segmentElement = document.createElement('div');
+                segmentElement.className = 'timeline-segment';
+                segmentElement.style.width = `${segmentWidth}%`;
+                segmentElement.title = `${formatTime(segment.start)} - ${formatTime(segment.end)}`;
+                segmentElement.dataset.index = index;
+                segmentElement.dataset.start = segment.start;
+                
+                // Calculate which page this segment is on
+                const segmentPage = Math.floor(index / SEGMENTS_PER_PAGE) + 1;
+                
+                segmentElement.addEventListener('click', () => {
+                    // Go to the page containing this segment
+                    if (currentPage !== segmentPage) {
+                        currentPage = segmentPage;
+                        renderTranscript();
+                    }
+                    
+                    // Scroll to and highlight the segment
+                    const segmentElement = document.getElementById(`segment-${index}`);
+                    if (segmentElement) {
+                        segmentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        segmentElement.classList.add('highlight');
+                        setTimeout(() => {
+                            segmentElement.classList.remove('highlight');
+                        }, 2000);
+                    }
+                });
+                
+                timelineSegments.appendChild(segmentElement);
+            });
+        }
+        
+        function renderTranscript() {
+            if (!transcriptData || !transcriptData.segments) return;
+            
+            // Update pagination controls
+            updatePaginationControls();
+            
+            // Calculate segment range for current page
+            const startIndex = (currentPage - 1) * SEGMENTS_PER_PAGE;
+            const endIndex = Math.min(startIndex + SEGMENTS_PER_PAGE, transcriptData.segments.length);
+            
+            // Clear transcript container
+            transcriptElem.innerHTML = '';
+            
+            // Render segments for current page
+            for (let i = startIndex; i < endIndex; i++) {
+                const segment = transcriptData.segments[i];
+                renderSegment(segment, i);
+            }
+            
+            // If we have search results, highlight them
+            highlightSearchResults();
+        }
+        
+        function renderSegment(segment, index) {
+            const segmentElem = document.createElement('div');
+            segmentElem.className = 'segment';
+            segmentElem.id = `segment-${index}`;
+            
+            // Time information
+            const timeElem = document.createElement('div');
+            timeElem.className = 'segment-time';
+            timeElem.textContent = `${formatTime(segment.start)} - ${formatTime(segment.end)}`;
+            segmentElem.appendChild(timeElem);
+            
+            // Full text
+            const textElem = document.createElement('div');
+            textElem.className = 'segment-text';
+            textElem.textContent = segment.text;
+            segmentElem.appendChild(textElem);
+            
+            // Words with confidence scores
+            if (segment.words && Array.isArray(segment.words)) {
+                const wordContainer = document.createElement('div');
+                wordContainer.className = 'word-container';
+                
+                segment.words.forEach(word => {
+                    const wordElem = document.createElement('span');
+                    wordElem.className = 'word';
+                    wordElem.textContent = word.word;
+                    
+                    // Add confidence class
+                    if (word.score >= CONFIDENCE_THRESHOLDS.HIGH) {
+                        wordElem.classList.add('confidence-high');
+                    } else if (word.score >= CONFIDENCE_THRESHOLDS.MEDIUM) {
+                        wordElem.classList.add('confidence-medium');
+                    } else {
+                        wordElem.classList.add('confidence-low');
+                    }
+                    
+                    // Add tooltip with timing and confidence
+                    const tooltip = document.createElement('span');
+                    tooltip.className = 'word-tooltip';
+                    tooltip.textContent = `${formatTime(word.start)} - ${formatTime(word.end)} (${(word.score * 100).toFixed(1)}%)`;
+                    wordElem.appendChild(tooltip);
+                    
+                    wordContainer.appendChild(wordElem);
+                });
+                
+                segmentElem.appendChild(wordContainer);
+            }
+            
+            transcriptElem.appendChild(segmentElem);
+        }
+        
+        function updatePaginationControls() {
+            prevPageBtn.disabled = currentPage <= 1;
+            nextPageBtn.disabled = currentPage >= totalPages;
+            pageInfo.textContent = `Page ${currentPage} of ${totalPages}`;
+        }
+        
+        function searchTranscript() {
+            const searchText = searchTextInput.value.trim().toLowerCase();
+            if (!searchText || !transcriptData || !transcriptData.segments) return;
+            
+            // Clear previous results
+            clearSearch(false);
+            
+            // Search in segments
+            transcriptData.segments.forEach((segment, segmentIndex) => {
+                if (segment.text.toLowerCase().includes(searchText)) {
+                    // Calculate which page this segment is on
+                    const segmentPage = Math.floor(segmentIndex / SEGMENTS_PER_PAGE) + 1;
+                    searchResults.push({ segmentIndex, page: segmentPage });
+                }
+            });
+            
+            if (searchResults.length > 0) {
+                // Jump to first result
+                jumpToSearchResult(0);
+            } else {
+                alert('No matches found');
+            }
+        }
+        
+        function jumpToSearchResult(index) {
+            if (index < 0 || index >= searchResults.length) return;
+            
+            currentSearchIndex = index;
+            const result = searchResults[index];
+            
+            // Switch to correct page if needed
+            if (currentPage !== result.page) {
+                currentPage = result.page;
+                renderTranscript();
+            } else {
+                // Just highlight results on current page
+                highlightSearchResults();
+            }
+            
+            // Scroll to the segment
+            const segmentElement = document.getElementById(`segment-${result.segmentIndex}`);
+            if (segmentElement) {
+                segmentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+        
+        function highlightSearchResults() {
+            // Remove existing highlights
+            document.querySelectorAll('.highlight').forEach(el => {
+                el.classList.remove('highlight');
+            });
+            
+            // Nothing to highlight if no search
+            if (searchResults.length === 0) return;
+            
+            // Highlight current search results on this page
+            searchResults.forEach((result, index) => {
+                if (Math.floor(result.segmentIndex / SEGMENTS_PER_PAGE) + 1 === currentPage) {
+                    const segmentElement = document.getElementById(`segment-${result.segmentIndex}`);
+                    if (segmentElement) {
+                        // Highlight the segment
+                        segmentElement.classList.add('highlight');
+                        
+                        // Highlight the current result differently
+                        if (index === currentSearchIndex) {
+                            segmentElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    }
+                }
+            });
+        }
+        
+        function clearSearch(resetInput = true) {
+            searchResults = [];
+            currentSearchIndex = -1;
+            
+            // Clear highlight
+            document.querySelectorAll('.highlight').forEach(el => {
+                el.classList.remove('highlight');
+            });
+            
+            // Clear search input
+            if (resetInput) {
+                searchTextInput.value = '';
+            }
+        }
+        
+        function clearTranscript() {
+            transcriptData = null;
+            transcriptElem.innerHTML = '';
+            transcriptWrapper.style.display = 'none';
+            videoIdInput.value = '';
+            searchTextInput.value = '';
+            clearSearch();
+            resetUI();
+        }
+        
+        function resetUI() {
+            showLoader(false);
+            errorMessage.style.display = 'none';
+            errorMessage.textContent = '';
+        }
+        
+        function showLoader(show) {
+            loader.style.display = show ? 'block' : 'none';
+        }
+        
+        function showError(message) {
+            showLoader(false);
+            errorMessage.style.display = 'block';
+            errorMessage.textContent = message;
+        }
+        
+        function formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            const ms = Math.floor((seconds % 1) * 100);
+            return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+        }
+    </script>
+</body>
+</html>
