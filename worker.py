@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 
 from job_tracker import JobTracker, JobState
 from downloader import YouTubeDownloader, DownloadError
-from transcriber import AudioSegmenter, WhisperTranscriber, TranscriptionError
+from transcriber import Transcriber, TranscriptionError
 from scanner import PhraseScanner
 
 # Setup logging
@@ -66,8 +66,16 @@ class Worker:
         # Initialize components
         self.job_tracker = JobTracker(s3_bucket, region)
         self.downloader = YouTubeDownloader(temp_dir)
-        self.segmenter = AudioSegmenter()
-        self.transcriber = WhisperTranscriber(use_gpu)
+        
+        # Initialize transcriber with correct parameters
+        device = "cuda" if use_gpu else "cpu"
+        self.transcriber = Transcriber(
+            model_name="large-v2",
+            device=device,
+            chunk_size=30,
+            s3_bucket=s3_bucket,
+            region=region
+        )
         
         # Ensure temp directory exists
         os.makedirs(temp_dir, exist_ok=True)
@@ -178,8 +186,23 @@ class Worker:
         """Start the worker's main loop"""
         logger.info(f"Starting worker with poll interval of {self.poll_interval}s")
         
+        # Create health check file for Docker health check
+        health_file = '/app/health_check.txt'
+        try:
+            with open(health_file, 'w') as f:
+                f.write(f"Started at {datetime.now().isoformat()}")
+        except:
+            logger.warning("Could not create health check file")
+        
         while True:
             try:
+                # Update health check file
+                try:
+                    with open(health_file, 'w') as f:
+                        f.write(f"Heartbeat at {datetime.now().isoformat()}")
+                except:
+                    pass
+                
                 # 1. Update heartbeat
                 self.update_heartbeat()
                 
@@ -346,43 +369,31 @@ class Worker:
             audio_wav = self.downloader.convert_to_wav(audio_mp4, video_temp_dir)
             self.job_tracker.update_progress(job_id, completed_chunks=2)
             
-            # Step 3: Split audio into segments
-            logger.info("Splitting audio into segments")
-            segments = self.segmenter.split_audio(audio_wav, video_temp_dir)
+            # Step 3: Segment audio and transcribe
+            # Using the Transcriber's methods directly - it handles segmentation internally
+            logger.info("Transcribing audio")
             
-            # Update job with total chunks
-            total_chunks = len(segments) + 3  # +3 for the steps we've already done
-            self.job_tracker.update_progress(job_id, total_chunks=total_chunks, completed_chunks=3)
+            # Check if we can resume transcription
+            transcription = self.transcriber.resume_transcription(
+                audio_file=audio_wav,
+                job_id=job_id,
+                job_tracker=self.job_tracker,
+                video_id=video_id
+            )
             
-            # Step 4: Transcribe each segment
-            logger.info(f"Transcribing {len(segments)} segments")
+            # Extract segments to text files for scanning
+            # We'll save each segment to a separate text file
+            segments_dir = os.path.join(video_temp_dir, "segments")
+            os.makedirs(segments_dir, exist_ok=True)
             
             transcript_files = []
-            for i, segment_file in enumerate(segments):
-                try:
-                    # Transcribe segment
-                    transcription = self.transcriber.transcribe_segment(segment_file)
-                    
-                    # Save to file
-                    txt_file = segment_file.replace(".wav", ".txt")
-                    with open(txt_file, "w", encoding="utf-8") as f:
-                        f.write(transcription)
-                    
-                    transcript_files.append(txt_file)
-                    
-                    # Upload to S3
-                    self.upload_transcription(txt_file, video_id)
-                    
-                    # Update progress
-                    self.job_tracker.update_progress(
-                        job_id, 
-                        completed_chunks=3 + i + 1
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"Error transcribing segment {i}: {str(e)}")
-            
-            # Step 5: Scan transcripts for the phrase
+            for i, segment in enumerate(transcription.get("segments", [])):
+                txt_file = os.path.join(segments_dir, f"segment_{i:03d}.txt")
+                with open(txt_file, "w", encoding="utf-8") as f:
+                    f.write(segment.get("text", ""))
+                transcript_files.append(txt_file)
+                
+            # Step 4: Scan transcripts for the phrase
             logger.info(f"Scanning transcripts for phrase '{phrase}'")
             scanner = PhraseScanner(phrase)
             stats = scanner.scan_transcripts(transcript_files)
@@ -406,12 +417,6 @@ class Worker:
             logger.error(f"Error processing video {video_id}: {str(e)}")
             raise
         finally:
-            # Release resources even if there was an error
-            try:
-                self.transcriber.cleanup()
-            except:
-                pass
-            
             # Clean up temp directory to save space
             try:
                 shutil.rmtree(video_temp_dir)
@@ -424,7 +429,13 @@ class Worker:
         s3_key = f"transcripts/{video_id}/{segment_name}"
         
         try:
-            self.s3.upload_file(txt_file, self.s3_bucket, s3_key)
+            with open(txt_file, 'rb') as f:
+                self.s3.put_object(
+                    Body=f.read(),
+                    Bucket=self.s3_bucket,
+                    Key=s3_key,
+                    ContentType="text/plain"
+                )
             return True
         except Exception as e:
             logger.error(f"Error uploading to S3: {str(e)}")
@@ -448,21 +459,56 @@ class Worker:
                 ContentType="application/json"
             )
             
+            # Update the master video list
+            self.update_video_list(video_id)
+            
             logger.info(f"Results saved to s3://{self.s3_bucket}/{s3_key}")
             return True
         except Exception as e:
             logger.error(f"Error saving results to S3: {str(e)}")
             return False
     
+    def update_video_list(self, video_id):
+        """Update the master video_list.json file with the new video ID"""
+        video_list_key = "video_list.json"
+        
+        try:
+            # Try to get the existing video list
+            try:
+                response = self.s3.get_object(Bucket=self.s3_bucket, Key=video_list_key)
+                video_list = json.loads(response['Body'].read().decode('utf-8'))
+                logger.info(f"Retrieved existing video list with {len(video_list)} videos")
+            except self.s3.exceptions.NoSuchKey:
+                # If the file doesn't exist yet, create an empty list
+                logger.info("No existing video list found, creating new one")
+                video_list = []
+            
+            # Check if video ID is already in the list
+            if video_id not in video_list:
+                # Add the new video ID and sort the list
+                video_list.append(video_id)
+                video_list.sort()
+                
+                # Convert to JSON and upload back to S3
+                video_list_json = json.dumps(video_list, indent=2)
+                self.s3.put_object(
+                    Body=video_list_json,
+                    Bucket=self.s3_bucket,
+                    Key=video_list_key,
+                    ContentType="application/json"
+                )
+                logger.info(f"Added video {video_id} to video_list.json (total: {len(video_list)})")
+            else:
+                logger.info(f"Video {video_id} already in video_list.json")
+                
+            return True
+        except Exception as e:
+            logger.error(f"Error updating video list: {str(e)}")
+            return False
+    
     def cleanup(self):
         """Clean up resources before shutdown"""
         logger.info("Cleaning up worker resources")
-        
-        try:
-            # Release transcriber resources
-            self.transcriber.cleanup()
-        except:
-            pass
         
         try:
             # Update heartbeat with inactive status
