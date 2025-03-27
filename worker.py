@@ -283,14 +283,14 @@ class Worker:
                     # Extract video ID
                     video_id = self.downloader.extract_video_id(youtube_url)
                     
-                    # Check if already processed
-                    if self.job_exists(video_id):
-                        logger.info(f"Video {video_id} already processed, skipping")
-                        self.sqs.delete_message(
-                            QueueUrl=self.queue_url,
-                            ReceiptHandle=receipt_handle
-                        )
-                        continue
+                    ## Check if already processed
+                    #if self.job_exists(video_id):
+                    #    logger.info(f"Video {video_id} already processed, skipping")
+                    #    self.sqs.delete_message(
+                    #        QueueUrl=self.queue_url,
+                    #        ReceiptHandle=receipt_handle
+                    #    )
+                    #    continue
                     
                     # Create job in tracker
                     self.job_tracker.create_job(
