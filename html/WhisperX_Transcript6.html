@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhisperX Transcript Viewer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/aws-sdk/2.1123.0/aws-sdk.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background-color: #f8f9fa;
+            color: #333;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #ddd;
+        }
+        .header h1 {
+            margin-bottom: 5px;
+            color: #2c3e50;
+        }
+        .panel {
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 20px;
+            margin-bottom: 20px;
+            position: relative;
+        }
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .panel-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2c3e50;
+            margin: 0;
+        }
+        
+        /* New layout styles */
+        .main-content {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .column {
+            flex: 1;
+            min-width: 300px;
+            transition: flex-basis 0.3s ease;
+        }
+        
+        /* Panel move controls */
+        .panel-controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+            z-index: 10;
+        }
+        .move-btn {
+            background-color: #f1f3f4;
+            color: #333;
+            border: none;
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .move-btn:hover {
+            background-color: #e8eaed;
+        }
+        .move-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        /* Responsive layout settings */
+        @media (min-width: 1200px) {
+            .main-content {
+                flex-wrap: nowrap;
+            }
+            .column.wide {
+                flex: 2;
+            }
+            .column.narrow {
+                flex: 1;
+            }
+        }
+        
+        .flex-row {
+            display: flex;
+            gap: 20px;
+        }
+        .flex-column {
+            display: flex;
+            flex-direction: column;
+        }
+        .grow {
+            flex-grow: 1;
+        }
+        .control-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: flex-end;
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-width: 0;
+        }
+        label {
+            font-size: 14px;
+            margin-bottom: 5px;
+            color: #555;
+        }
+        input, select, button {
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            background-color: #fff;
+        }
+        select {
+            cursor: pointer;
+            min-width: 200px;
+        }
+        button {
+            background-color: #4285f4;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 500;
+        }
+        button:hover {
+            background-color: #3367d6;
+        }
+        button:disabled {
+            background-color: #a8a8a8;
+            cursor: not-allowed;
+        }
+        .btn-icon {
+            margin-right: 6px;
+        }
+        .btn-secondary {
+            background-color: #f1f3f4;
+            color: #333;
+        }
+        .btn-secondary:hover {
+            background-color: #e8eaed;
+        }
+        .btn-play {
+            background-color: #ff0000;
+        }
+        .btn-play:hover {
+            background-color: #cc0000;
+        }
+        .video-container {
+            position: relative;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 15px;
+            height: 0;
+            padding-bottom: 56.25%; /* 16:9 aspect ratio */
+        }
+        #youtube-player {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .video-info {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+        .video-title {
+            flex-grow: 1;
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0;
+        }
+        .video-stats {
+            color: #606060;
+            font-size: 14px;
+        }
+        .search-form {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .search-input {
+            flex-grow: 1;
+        }
+        .timeline {
+            position: relative;
+            height: 40px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+            margin: 15px 0;
+            overflow: hidden;
+            cursor: pointer;
+        }
+        .timeline-progress {
+            position: absolute;
+            height: 100%;
+            background-color: rgba(255, 0, 0, 0.2);
+            width: 0;
+            pointer-events: none;
+        }
+        .timeline-marker {
+            position: absolute;
+            top: 0;
+            height: 100%;
+            width: 2px;
+            background-color: #ff0000;
+            z-index: 10;
+        }
+        .timeline-segment {
+            position: absolute;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.05);
+            border-right: 1px solid rgba(0, 0, 0, 0.1);
+        }
+        .timeline-segment:hover {
+            background-color: rgba(66, 133, 244, 0.3);
+        }
+        .transcript-container {
+            max-height: 700px; /* Increased height for better visibility */
+            overflow-y: auto;
+            padding-right: 10px;
+        }
+        .segment {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-left: 3px solid #4285f4;
+            background-color: #f9f9f9;
+            border-radius: 0 4px 4px 0;
+            transition: background-color 0.2s;
+            position: relative;
+        }
+        .segment:hover {
+            background-color: #f1f3f4;
+        }
+        .segment.active {
+            background-color: #e8f0fe;
+            border-left-color: #ff0000;
+        }
+        .segment.highlight {
+            background-color: #fff9c4;
+        }
+        .segment-time {
+            font-size: 13px;
+            color: #606060;
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+        }
+        .segment-text {
+            font-size: 15px;
+            line-height: 1.5;
+        }
+        .play-button {
+            background-color: #ff0000;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 3px 8px;
+            margin-right: 10px;
+            font-size: 12px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+        }
+        .play-button:hover {
+            background-color: #cc0000;
+        }
+        .word-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            margin-top: 8px;
+        }
+        .word {
+            position: relative;
+            padding: 2px 4px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .word:hover {
+            background-color: #e3f2fd;
+        }
+        .word-tooltip {
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #333;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+            white-space: nowrap;
+            z-index: 1000;
+        }
+        .word:hover .word-tooltip {
+            opacity: 1;
+        }
+        .confidence-high {
+            background-color: rgba(76, 175, 80, 0.1);
+            border-bottom: 2px solid #4caf50;
+        }
+        .confidence-medium {
+            background-color: rgba(255, 193, 7, 0.1);
+            border-bottom: 2px solid #ffc107;
+        }
+        .confidence-low {
+            background-color: rgba(244, 67, 54, 0.1);
+            border-bottom: 2px solid #f44336;
+        }
+        .status-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            color: #606060;
+            margin: 10px 0;
+        }
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .pagination-text {
+            font-size: 14px;
+            color: #606060;
+        }
+        #loader {
+            display: none;
+            text-align: center;
+            padding: 30px;
+        }
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        #error-message {
+            color: #f44336;
+            text-align: center;
+            margin: 20px 0;
+            padding: 15px;
+            border-left: 4px solid #f44336;
+            background-color: #ffebee;
+            border-radius: 4px;
+            display: none;
+        }
+        .confidence-legend {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+            font-size: 13px;
+        }
+        .confidence-item {
+            display: flex;
+            align-items: center;
+        }
+        .confidence-color {
+            width: 16px;
+            height: 16px;
+            margin-right: 6px;
+            border-radius: 2px;
+        }
+        .hidden {
+            display: none;
+        }
+        .mt-10 {
+            margin-top: 10px;
+        }
+        .mt-20 {
+            margin-top: 20px;
+        }
+        
+        .search-results-list {
+            max-height: 300px;
+            overflow-y: auto;
+            margin-bottom: 15px;
+        }
+        
+        .search-result-item {
+            padding: 10px;
+            margin-bottom: 10px;
+            border-left: 3px solid #ffc107;
+            background-color: #fff9c4;
+            border-radius: 0 4px 4px 0;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .search-result-item:hover {
+            background-color: #fff59d;
+            transform: translateX(2px);
+        }
+        
+        .search-result-time {
+            font-size: 13px;
+            font-weight: 600;
+            color: #ff0000;
+            margin-bottom: 5px;
+        }
+        
+        .search-result-context {
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .search-highlight {
+            background-color: #ffeb3b;
+            padding: 2px 0;
+            font-weight: 600;
+        }
+        
+        .search-result-nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+        }
+        
+        .search-pagination {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .search-page-info {
+            font-size: 14px;
+            color: #606060;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>WhisperX Transcript Viewer</h1>
+        </div>
+        
+        <!-- Configuration Panel -->
+        <div class="panel">
+            <div class="panel-header">
+                <h2 class="panel-title">Video Selection</h2>
+            </div>
+            
+            <div class="control-group">
+                <div class="input-group">
+                    <label for="s3-bucket">S3 Bucket:</label>
+                    <input type="text" id="s3-bucket" value="2025-03-15-youtube-transcripts" placeholder="S3 Bucket Name">
+                </div>
+                <div class="input-group">
+                    <label for="s3-region">Region:</label>
+                    <input type="text" id="s3-region" value="us-east-2" placeholder="S3 Region (e.g., us-east-2)">
+                </div>
+                <button id="config-btn" type="button">
+                    <svg class="btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 4V20M4 12H20" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    Load Videos
+                </button>
+            </div>
+            
+            <div class="input-group">
+                <label for="video-select">Select Video:</label>
+                <select id="video-select" disabled>
+                    <option value="">Select a video...</option>
+                </select>
+            </div>
+        </div>
+        
+        <!-- Main Content with Flexible Layout -->
+        <div id="content-wrapper" class="hidden">
+            <div class="main-content">
+                <!-- Left Column -->
+                <div id="column-left" class="column wide">
+                    <!-- Video Player Panel -->
+                    <div id="panel-video" class="panel" data-panel-id="video">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Video Player</h2>
+                        </div>
+                        <div class="panel-controls">
+                            <button class="move-btn move-right" data-panel="video" title="Move to right column">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 18l6-6-6-6"/>
+                                </svg>
+                            </button>
+                        </div>
+                        
+                        <div class="video-container">
+                            <div id="youtube-player"></div>
+                        </div>
+                        
+                        <div class="video-info">
+                            <h3 class="video-title" id="video-title">Video Title</h3>
+                        </div>
+                        
+                        <div class="video-stats">
+                            <span id="segment-count">0</span> segments | 
+                            <span id="word-count">0</span> words | 
+                            Duration: <span id="duration">0:00</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Timeline Panel -->
+                    <div id="panel-timeline" class="panel" data-panel-id="timeline">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Timeline</h2>
+                        </div>
+                        <div class="panel-controls">
+                            <button class="move-btn move-right" data-panel="timeline" title="Move to right column">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 18l6-6-6-6"/>
+                                </svg>
+                            </button>
+                        </div>
+                        
+                        <div class="timeline" id="timeline">
+                            <div class="timeline-progress" id="timeline-progress"></div>
+                            <div class="timeline-marker" id="timeline-marker"></div>
+                            <div id="timeline-segments"></div>
+                        </div>
+                        
+                        <div id="search-results-panel" class="panel hidden">
+                            <div class="panel-header">
+                                <h2 class="panel-title">Search Results</h2>
+                                <span id="search-count"></span>
+                            </div>
+                            <div id="search-results-list" class="search-results-list"></div>
+                        </div>
+                        
+                        <div class="search-form">
+                            <div class="input-group search-input">
+                                <label for="search-text">Search in transcript:</label>
+                                <input type="text" id="search-text" placeholder="Enter text to search...">
+                            </div>
+                            <button id="search-btn" type="button">
+                                <svg class="btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="11" cy="11" r="8"></circle>
+                                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                                </svg>
+                                Search
+                            </button>
+                            <button id="clear-search-btn" type="button" class="btn-secondary">
+                                <svg class="btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                                Clear
+                            </button>
+                            <div class="search-result-nav hidden" id="search-nav">
+                                <span class="search-page-info" id="search-page-info">Result 1 of 1</span>
+                                <div class="search-pagination">
+                                    <button id="prev-result" class="btn-secondary" disabled>
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="15 18 9 12 15 6"></polyline>
+                                        </svg>
+                                    </button>
+                                    <button id="next-result" class="btn-secondary" disabled>
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9 18 15 12 9 6"></polyline>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="confidence-legend">
+                            <div class="confidence-item">
+                                <div class="confidence-color confidence-high"></div>
+                                <span>High Confidence</span>
+                            </div>
+                            <div class="confidence-item">
+                                <div class="confidence-color confidence-medium"></div>
+                                <span>Medium Confidence</span>
+                            </div>
+                            <div class="confidence-item">
+                                <div class="confidence-color confidence-low"></div>
+                                <span>Low Confidence</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right Column -->
+                <div id="column-right" class="column wide">
+                    <!-- Transcript Panel -->
+                    <div id="panel-transcript" class="panel" data-panel-id="transcript">
+                        <div class="panel-header">
+                            <h2 class="panel-title">Transcript</h2>
+                            <div class="pagination">
+                                <button id="prev-page" disabled>
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="15 18 9 12 15 6"></polyline>
+                                    </svg>
+                                </button>
+                                <span id="page-info" class="pagination-text">Page 1 of 1</span>
+                                <button id="next-page" disabled>
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="9 18 15 12 9 6"></polyline>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="panel-controls">
+                            <button class="move-btn move-left" data-panel="transcript" title="Move to left column">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M15 18l-6-6 6-6"/>
+                                </svg>
+                            </button>
+                        </div>
+                        
+                        <div class="transcript-container" id="transcript"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Loading and Error States -->
+        <div id="loader">
+            <div class="spinner"></div>
+            <p>Loading data...</p>
+        </div>
+        
+        <div id="error-message"></div>
+    </div>
+    
+    <!-- Link to the JavaScript file -->
+    <script src="whisperx-script.js"></script>
+</body>
+</html>
