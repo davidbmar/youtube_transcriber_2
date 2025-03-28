@@ -1,3 +1,289 @@
+document.addEventListener('DOMContentLoaded', function() {
+    // Constants and configurations
+    const SEGMENTS_PER_PAGE = 20;
+    const CONFIDENCE_THRESHOLDS = {
+        HIGH: 0.8,
+        MEDIUM: 0.6
+    };
+    
+    // Global variables
+    let transcriptData = null;
+    let currentPage = 1;
+    let totalPages = 1;
+    let searchResults = [];
+    let currentSearchIndex = -1;
+    let videoListData = null;
+    let currentVideoId = null;
+    let youtubePlayer = null;
+    let isPlayerReady = false;
+    let autoScroll = true;
+    let activeSegmentIndex = -1;
+    
+    // DOM Elements
+    const configBtn = document.getElementById('config-btn');
+    const s3BucketInput = document.getElementById('s3-bucket');
+    const s3RegionInput = document.getElementById('s3-region');
+    const videoSelect = document.getElementById('video-select');
+    const videoTitle = document.getElementById('video-title');
+    const transcriptElem = document.getElementById('transcript');
+    const contentWrapper = document.getElementById('content-wrapper');
+    const loader = document.getElementById('loader');
+    const errorMessage = document.getElementById('error-message');
+    const searchTextInput = document.getElementById('search-text');
+    const searchBtn = document.getElementById('search-btn');
+    const clearSearchBtn = document.getElementById('clear-search-btn');
+    const prevPageBtn = document.getElementById('prev-page');
+    const nextPageBtn = document.getElementById('next-page');
+    const pageInfo = document.getElementById('page-info');
+    const segmentCount = document.getElementById('segment-count');
+    const wordCount = document.getElementById('word-count');
+    const durationElem = document.getElementById('duration');
+    const timeline = document.getElementById('timeline');
+    const timelineProgress = document.getElementById('timeline-progress');
+    const timelineMarker = document.getElementById('timeline-marker');
+    const timelineSegments = document.getElementById('timeline-segments');
+    const prevResultBtn = document.getElementById('prev-result');
+    const nextResultBtn = document.getElementById('next-result');
+    const searchNavElem = document.getElementById('search-nav');
+    const searchPageInfo = document.getElementById('search-page-info');
+    const columnLeft = document.getElementById('column-left');
+    const columnRight = document.getElementById('column-right');
+    
+    // Set up panel move controls
+    setupPanelControls();
+    
+    // Initialize YouTube API
+    let tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    let firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+    
+    // Event listeners
+    prevResultBtn.addEventListener('click', () => {
+        if (currentSearchIndex > 0) {
+            jumpToSearchResult(currentSearchIndex - 1);
+        }
+    });
+    
+    nextResultBtn.addEventListener('click', () => {
+        if (currentSearchIndex < searchResults.length - 1) {
+            jumpToSearchResult(currentSearchIndex + 1);
+        }
+    });
+    
+    configBtn.addEventListener('click', loadVideoList);
+    
+    // Handle video selection
+    videoSelect.addEventListener('change', function() {
+        const videoId = this.value;
+        if (videoId) {
+            loadTranscript(videoId);
+        }
+    });
+    
+    // Timeline click events
+    timeline.addEventListener('click', function(event) {
+        if (!transcriptData || !youtubePlayer || !isPlayerReady) return;
+        
+        const rect = timeline.getBoundingClientRect();
+        const clickPos = (event.clientX - rect.left) / rect.width;
+        
+        const lastSegment = transcriptData.segments[transcriptData.segments.length - 1];
+        const totalDuration = lastSegment.end;
+        const seekTime = clickPos * totalDuration;
+        
+        seekToTime(seekTime);
+    });
+    
+    // Search functionality
+    searchBtn.addEventListener('click', searchTranscript);
+    clearSearchBtn.addEventListener('click', clearSearch);
+    searchTextInput.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            searchTranscript();
+        }
+    });
+    
+    // Pagination
+    prevPageBtn.addEventListener('click', function() {
+        if (currentPage > 1) {
+            currentPage--;
+            renderTranscript();
+        }
+    });
+    
+    nextPageBtn.addEventListener('click', function() {
+        if (currentPage < totalPages) {
+            currentPage++;
+            renderTranscript();
+        }
+    });
+    
+    // Try to load videos automatically
+    loadVideoList();
+    
+    // Function called when YouTube API is ready
+    window.onYouTubeIframeAPIReady = function() {
+        console.log("YouTube API ready");
+    };
+    
+    // Set up panel move controls
+    function setupPanelControls() {
+        document.querySelectorAll('.move-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const direction = this.classList.contains('move-left') ? 'left' : 'right';
+                const panelId = this.getAttribute('data-panel');
+                movePanel(panelId, direction);
+            });
+        });
+    }
+    
+    // Move panel between columns
+    function movePanel(panelId, direction) {
+        const panel = document.getElementById(`panel-${panelId}`);
+        if (!panel) return;
+        
+        // Get current parent and target parent
+        const currentParent = panel.parentElement;
+        const targetParent = direction === 'left' ? columnLeft : columnRight;
+        
+        // Don't move if already in target column
+        if (currentParent === targetParent) return;
+        
+        // Move the panel
+        targetParent.appendChild(panel);
+        
+        // Update move buttons
+        updatePanelControls(panel, direction);
+    }
+    
+    // Update panel control buttons after moving
+    function updatePanelControls(panel, direction) {
+        // Find control buttons in this panel
+        const leftBtn = panel.querySelector('.move-btn.move-left');
+        const rightBtn = panel.querySelector('.move-btn.move-right');
+        
+        // Show/hide appropriate buttons based on current column
+        if (direction === 'left') {
+            // Panel is now in left column, show right button, hide left button
+            if (leftBtn) leftBtn.classList.add('hidden');
+            if (rightBtn) rightBtn.classList.remove('hidden');
+            
+            // If no right button exists, create one
+            if (!rightBtn) {
+                createMoveButton(panel, 'right');
+            }
+        } else {
+            // Panel is now in right column, show left button, hide right button
+            if (rightBtn) rightBtn.classList.add('hidden');
+            if (leftBtn) leftBtn.classList.remove('hidden');
+            
+            // If no left button exists, create one
+            if (!leftBtn) {
+                createMoveButton(panel, 'left');
+            }
+        }
+    }
+    
+    // Create a new move button for a panel
+    function createMoveButton(panel, direction) {
+        const panelId = panel.getAttribute('data-panel-id');
+        const panelControls = panel.querySelector('.panel-controls');
+        
+        if (!panelControls || !panelId) return;
+        
+        const newBtn = document.createElement('button');
+        newBtn.className = `move-btn move-${direction}`;
+        newBtn.setAttribute('data-panel', panelId);
+        newBtn.setAttribute('title', `Move to ${direction} column`);
+        
+        // Set button icon based on direction
+        if (direction === 'left') {
+            newBtn.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M15 18l-6-6 6-6"/>
+                </svg>
+            `;
+        } else {
+            newBtn.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M9 18l6-6-6-6"/>
+                </svg>
+            `;
+        }
+        
+        // Add click event
+        newBtn.addEventListener('click', function() {
+            movePanel(panelId, direction);
+        });
+        
+        panelControls.appendChild(newBtn);
+    }
+    
+    function loadVideoList() {
+        const bucketName = s3BucketInput.value.trim();
+        const region = s3RegionInput.value.trim();
+        
+        if (!bucketName) {
+            showError("Please enter S3 bucket name");
+            return;
+        }
+        
+        resetUI();
+        showLoader(true);
+        
+        // Configure S3 for public access
+        AWS.config.region = region;
+        AWS.config.credentials = new AWS.Credentials('dummy', 'dummy'); // Using dummy credentials
+        
+        const s3 = new AWS.S3({
+            signatureVersion: 'v4',
+            s3ForcePathStyle: true, // Use path-style URLs
+            endpoint: `https://${bucketName}.s3.${region}.amazonaws.com`,
+            params: { Bucket: bucketName }
+        });
+        
+        // Function to get S3 object
+        function getS3Object(key) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                const url = `https://${bucketName}.s3.${region}.amazonaws.com/${key}`;
+                
+                xhr.open('GET', url, true);
+                xhr.onload = function() {
+                    if (xhr.status === 200) {
+                        resolve(xhr.responseText);
+                    } else {
+                        reject(new Error(`Failed to load ${url}: ${xhr.status} ${xhr.statusText}`));
+                    }
+                };
+                xhr.onerror = function() {
+                    reject(new Error(`Network error when loading ${url}`));
+                };
+                xhr.send();
+            });
+        }
+        
+        // Try to get the video list
+        const videoListKey = "youtube_transcriber_2.json";
+        
+        getS3Object(videoListKey)
+            .then(data => {
+                try {
+                    videoListData = JSON.parse(data);
+                    populateVideoDropdown(videoListData);
+                    showLoader(false);
+                } catch (parseErr) {
+                    showError("Error parsing video list data: " + parseErr.message);
+                }
+            })
+            .catch(err => {
+                showError("Error loading video list: " + err.message);
+            });
+    }
+    
+
+
 function loadVideoList() {
         const bucketName = s3BucketInput.value.trim();
         const region = s3RegionInput.value.trim();
@@ -876,225 +1162,4 @@ function loadVideoList() {
         return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
     }
 
-    document.addEventListener('DOMContentLoaded', function() {
-        // Constants and configurations
-        const SEGMENTS_PER_PAGE = 20;
-        const CONFIDENCE_THRESHOLDS = {
-        HIGH: 0.8,
-        MEDIUM: 0.6
-    };
-    
-    // Global variables
-    let transcriptData = null;
-    let currentPage = 1;
-    let totalPages = 1;
-    let searchResults = [];
-    let currentSearchIndex = -1;
-    let videoListData = null;
-    let currentVideoId = null;
-    let youtubePlayer = null;
-    let isPlayerReady = false;
-    let autoScroll = true;
-    let activeSegmentIndex = -1;
-    
-    // DOM Elements
-    const configBtn = document.getElementById('config-btn');
-    const s3BucketInput = document.getElementById('s3-bucket');
-    const s3RegionInput = document.getElementById('s3-region');
-    const videoSelect = document.getElementById('video-select');
-    const videoTitle = document.getElementById('video-title');
-    const transcriptElem = document.getElementById('transcript');
-    const contentWrapper = document.getElementById('content-wrapper');
-    const loader = document.getElementById('loader');
-    const errorMessage = document.getElementById('error-message');
-    const searchTextInput = document.getElementById('search-text');
-    const searchBtn = document.getElementById('search-btn');
-    const clearSearchBtn = document.getElementById('clear-search-btn');
-    const prevPageBtn = document.getElementById('prev-page');
-    const nextPageBtn = document.getElementById('next-page');
-    const pageInfo = document.getElementById('page-info');
-    const segmentCount = document.getElementById('segment-count');
-    const wordCount = document.getElementById('word-count');
-    const durationElem = document.getElementById('duration');
-    const timeline = document.getElementById('timeline');
-    const timelineProgress = document.getElementById('timeline-progress');
-    const timelineMarker = document.getElementById('timeline-marker');
-    const timelineSegments = document.getElementById('timeline-segments');
-    const prevResultBtn = document.getElementById('prev-result');
-    const nextResultBtn = document.getElementById('next-result');
-    const searchNavElem = document.getElementById('search-nav');
-    const searchPageInfo = document.getElementById('search-page-info');
-    const columnLeft = document.getElementById('column-left');
-    const columnRight = document.getElementById('column-right');
-    
-    // Set up panel move controls
-    setupPanelControls();
-    
-    // Initialize YouTube API
-    let tag = document.createElement('script');
-    tag.src = "https://www.youtube.com/iframe_api";
-    let firstScriptTag = document.getElementsByTagName('script')[0];
-    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-    
-    // Event listeners
-    prevResultBtn.addEventListener('click', () => {
-        if (currentSearchIndex > 0) {
-            jumpToSearchResult(currentSearchIndex - 1);
-        }
-    });
-    
-    nextResultBtn.addEventListener('click', () => {
-        if (currentSearchIndex < searchResults.length - 1) {
-            jumpToSearchResult(currentSearchIndex + 1);
-        }
-    });
-    
-    configBtn.addEventListener('click', loadVideoList);
-    
-    // Handle video selection
-    videoSelect.addEventListener('change', function() {
-        const videoId = this.value;
-        if (videoId) {
-            loadTranscript(videoId);
-        }
-    });
-    
-    // Timeline click events
-    timeline.addEventListener('click', function(event) {
-        if (!transcriptData || !youtubePlayer || !isPlayerReady) return;
-        
-        const rect = timeline.getBoundingClientRect();
-        const clickPos = (event.clientX - rect.left) / rect.width;
-        
-        const lastSegment = transcriptData.segments[transcriptData.segments.length - 1];
-        const totalDuration = lastSegment.end;
-        const seekTime = clickPos * totalDuration;
-        
-        seekToTime(seekTime);
-    });
-    
-    // Search functionality
-    searchBtn.addEventListener('click', searchTranscript);
-    clearSearchBtn.addEventListener('click', clearSearch);
-    searchTextInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-            searchTranscript();
-        }
-    });
-    
-    // Pagination
-    prevPageBtn.addEventListener('click', function() {
-        if (currentPage > 1) {
-            currentPage--;
-            renderTranscript();
-        }
-    });
-    
-    nextPageBtn.addEventListener('click', function() {
-        if (currentPage < totalPages) {
-            currentPage++;
-            renderTranscript();
-        }
-    });
-    
-    // Try to load videos automatically
-    loadVideoList();
-    
-    // Function called when YouTube API is ready
-    window.onYouTubeIframeAPIReady = function() {
-        console.log("YouTube API ready");
-    };
-    
-    // Set up panel move controls
-    function setupPanelControls() {
-        document.querySelectorAll('.move-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
-                const direction = this.classList.contains('move-left') ? 'left' : 'right';
-                const panelId = this.getAttribute('data-panel');
-                movePanel(panelId, direction);
-            });
-        });
-    }
-    
-    // Move panel between columns
-    function movePanel(panelId, direction) {
-        const panel = document.getElementById(`panel-${panelId}`);
-        if (!panel) return;
-        
-        // Get current parent and target parent
-        const currentParent = panel.parentElement;
-        const targetParent = direction === 'left' ? columnLeft : columnRight;
-        
-        // Don't move if already in target column
-        if (currentParent === targetParent) return;
-        
-        // Move the panel
-        targetParent.appendChild(panel);
-        
-        // Update move buttons
-        updatePanelControls(panel, direction);
-    }
-    
-    // Update panel control buttons after moving
-    function updatePanelControls(panel, direction) {
-        // Find control buttons in this panel
-        const leftBtn = panel.querySelector('.move-btn.move-left');
-        const rightBtn = panel.querySelector('.move-btn.move-right');
-        
-        // Show/hide appropriate buttons based on current column
-        if (direction === 'left') {
-            // Panel is now in left column, show right button, hide left button
-            if (leftBtn) leftBtn.classList.add('hidden');
-            if (rightBtn) rightBtn.classList.remove('hidden');
-            
-            // If no right button exists, create one
-            if (!rightBtn) {
-                createMoveButton(panel, 'right');
-            }
-        } else {
-            // Panel is now in right column, show left button, hide right button
-            if (rightBtn) rightBtn.classList.add('hidden');
-            if (leftBtn) leftBtn.classList.remove('hidden');
-            
-            // If no left button exists, create one
-            if (!leftBtn) {
-                createMoveButton(panel, 'left');
-            }
-        }
-    }
-    
-    // Create a new move button for a panel
-    function createMoveButton(panel, direction) {
-        const panelId = panel.getAttribute('data-panel-id');
-        const panelControls = panel.querySelector('.panel-controls');
-        
-        if (!panelControls || !panelId) return;
-        
-        const newBtn = document.createElement('button');
-        newBtn.className = `move-btn move-${direction}`;
-        newBtn.setAttribute('data-panel', panelId);
-        newBtn.setAttribute('title', `Move to ${direction} column`);
-        
-        // Set button icon based on direction
-        if (direction === 'left') {
-            newBtn.innerHTML = `
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M15 18l-6-6 6-6"/>
-                </svg>
-            `;
-        } else {
-            newBtn.innerHTML = `
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M9 18l6-6-6-6"/>
-                </svg>
-            `;
-        }
-        
-        // Add click event
-        newBtn.addEventListener('click', function() {
-            movePanel(panelId, direction);
-        });
-        
-        panelControls.appendChild(newBtn);
-    }
-}
+});
