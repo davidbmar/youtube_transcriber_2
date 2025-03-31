@@ -1,29 +1,16 @@
 #!/bin/bash
 
-# Version-aware test script for Lambda function
+# Mac-compatible test script for Lambda function
 echo "Testing Lambda function..."
 
-# Check AWS CLI version
-AWS_CLI_VERSION=$(aws --version)
-echo "AWS CLI Version: $AWS_CLI_VERSION"
+# Encode the payload in base64 (Mac compatible)
+PAYLOAD=$(echo '{"command":"list_gpu_types"}' | base64)
 
-# Choose the right command format based on CLI version
-if [[ $AWS_CLI_VERSION == *"aws-cli/2"* ]]; then
-    echo "Using AWS CLI v2 format"
-    aws lambda invoke \
-      --function-name runpod-manager \
-      --cli-binary-format raw-in-base64-out \
-      --payload '{"command":"list_gpu_types"}' \
-      output.json
-else
-    echo "Using AWS CLI v1 format"
-    # For v1, encode the payload in base64
-    PAYLOAD=$(echo '{"command":"list_gpu_types"}' | base64)
-    aws lambda invoke \
-      --function-name runpod-manager \
-      --payload "$PAYLOAD" \
-      output.json
-fi
+# Invoke Lambda with base64 encoded payload
+aws lambda invoke \
+  --function-name runpod-manager \
+  --payload "$PAYLOAD" \
+  output.json
 
 # Display the result if successful
 if [ -f output.json ]; then
